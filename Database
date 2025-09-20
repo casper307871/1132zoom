@@ -1,0 +1,186 @@
+import os
+import zipfile
+
+BOT_TOKEN = "7247602122:AAHz0kVSOOiNPfTLdZA_YR1RKmIPBhZRBYE"
+BASE_FOLDER = "TelegramCleanupBot_OneClick_DB"
+
+os.makedirs(BASE_FOLDER, exist_ok=True)
+
+# ---- bot.py ----
+bot_py = f"""import logging
+from telegram import Update
+from telegram.ext import Updater, CommandHandler, CallbackContext
+from db import SessionLocal, init_db, User, MessageLog
+
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+init_db()
+db = SessionLocal()
+
+def start(update: Update, context: CallbackContext):
+    telegram_id = str(update.effective_user.id)
+    user = db.query(User).filter_by(telegram_id=telegram_id).first()
+    if not user:
+        user = User(
+            telegram_id=telegram_id,
+            username=update.effective_user.username
+        )
+        db.add(user)
+        db.commit()
+    update.message.reply_text("✅ Welcome! Your bot is running.")
+
+def main():
+    TOKEN = "{BOT_TOKEN}"
+    updater = Updater(TOKEN)
+    dp = updater.dispatcher
+    dp.add_handler(CommandHandler("start", start))
+    updater.start_polling()
+    updater.idle()
+
+if __name__ == "__main__":
+    main()
+"""
+with open(os.path.join(BASE_FOLDER, "bot.py"), "w") as f:
+    f.write(bot_py)
+
+# ---- db.py ----
+db_py = """from sqlalchemy import create_engine, Column, Integer, String, DateTime
+from sqlalchemy.orm import declarative_base, sessionmaker
+import os
+from datetime import datetime
+
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///bot.db")
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(bind=engine)
+Base = declarative_base()
+
+class User(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True, index=True)
+    telegram_id = Column(String, unique=True, index=True)
+    username = Column(String)
+    joined_at = Column(DateTime, default=datetime.utcnow)
+
+class MessageLog(Base):
+    __tablename__ = "message_logs"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String)
+    content = Column(String)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+
+def init_db():
+    Base.metadata.create_all(bind=engine)
+"""
+with open(os.path.join(BASE_FOLDER, "db.py"), "w") as f:
+    f.write(db_py)
+
+# ---- requirements.txt ----
+with open(os.path.join(BASE_FOLDER, "requirements.txt"), "w") as f:
+    f.write("python-telegram-bot\nsqlalchemy\npsycopg2-binary\n")
+
+# ---- Dockerfile ----
+dockerfile = """FROM python:3.11-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY bot.py .
+COPY db.py .
+CMD ["python", "bot.py"]
+"""
+with open(os.path.join(BASE_FOLDER, "Dockerfile"), "w") as f:
+    f.write(dockerfile)
+
+# ---- docker-compose.yml ----
+docker_compose = """version: '3.8'
+services:
+  telegram-bot:
+    build: .
+    container_name: telegram_cleanup_bot
+    restart: unless-stopped
+    depends_on:
+      - db
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@db:5432/telegram_bot_db
+
+  db:
+    image: postgres:15
+    container_name: telegram_bot_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: telegram_bot_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
+"""
+with open(os.path.join(BASE_FOLDER, "docker-compose.yml"), "w") as f:
+    f.write(docker_compose)
+
+# ---- README.md ----
+readme = """# Telegram Cleanup Bot - One Click Deployment with Database
+
+## Setup
+
+1. Run: `docker-compose up -d --build`
+2. Bot starts automatically. Use `/start` in Telegram to test.
+3. PostgreSQL database will persist in Docker volume `pgdata`.
+"""
+with open(os.path.join(BASE_FOLDER, "README.md"), "w") as f:
+    f.write(readme)
+
+# ---- .pylintrc ----
+pylintrc = """[MESSAGES CONTROL]
+disable=C0114,C0115,C0116,R0903,C0301,W0105
+[FORMAT]
+max-line-length=120
+"""
+with open(os.path.join(BASE_FOLDER, ".pylintrc"), "w") as f:
+    f.write(pylintrc)
+
+# ---- GitHub Actions workflow ----
+workflow_folder = os.path.join(BASE_FOLDER, ".github", "workflows")
+os.makedirs(workflow_folder, exist_ok=True)
+workflow = """name: Pylint CI
+on: [push, pull_request]
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.8","3.9","3.10","3.11"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v3
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pylint
+          pip install -r requirements.txt
+      - name: Run Pylint
+        run: |
+          FILES=$(git ls-files '*.py' | grep -vE 'venv|__pycache__|build|dist')
+          if [ -n "$FILES" ]; then
+            pylint --rcfile=.pylintrc $FILES || true
+"""
+with open(os.path.join(workflow_folder, "pylint.yml"), "w") as f:
+    f.write(workflow)
+
+# ---- Create ZIP ----
+zip_path = "TelegramCleanupBot_OneClick_WithToken_DB.zip"
+with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+    for root, dirs, files in os.walk(BASE_FOLDER):
+        for file in files:
+            file_path = os.path.join(root, file)
+            zipf.write(file_path, os.path.relpath(file_path, BASE_FOLDER))
+
+print(f"✅ ZIP created: {zip_path}")
